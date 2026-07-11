@@ -907,18 +907,24 @@ class SafeUnpickler(pickle.Unpickler):
 
 def _parse_custom_yolo11_pt(weight: str) -> Optional[Tuple[str, str]]:
     name = Path(weight).name
-    match = re.match(r"^yolo11([nslmx])-(.+)\.pt$", name)
+    match = re.match(r"^yolo11([pnslmx])(?:-(.+))?\.pt$", name)
     if not match:
         return None
-    return match.group(1), match.group(2)
+    scale, suffix = match.groups()
+    # Official n/s/m/l/x checkpoints should keep using the normal download/load path. Plain pico is custom because
+    # there is no official yolo11p.pt asset, while suffixed names identify custom architectures for every scale.
+    if scale != "p" and suffix is None:
+        return None
+    return scale, suffix or ""
 
 
 def _resolve_custom_yolo11_yaml(scale: str, suffix: str) -> Optional[Path]:
     cfg_dir = ROOT / "cfg" / "models" / "11"
-    sized = cfg_dir / f"yolo11{scale}-{suffix}.yaml"
+    separator = "-" if suffix else ""
+    sized = cfg_dir / f"yolo11{scale}{separator}{suffix}.yaml"
     if sized.exists():
         return sized
-    unsized = cfg_dir / f"yolo11-{suffix}.yaml"
+    unsized = cfg_dir / f"yolo11{separator}{suffix}.yaml"
     if unsized.exists():
         return unsized
     return None
@@ -960,7 +966,9 @@ def _create_custom_yolo11_ckpt(weight: str, output_path: Path) -> Optional[Tuple
     cfg_dict["yaml_file"] = str(yaml_path)
     target_model = DetectionModel(cfg=cfg_dict, ch=3, nc=80, verbose=False)
     target_state = target_model.state_dict()
-    base_path = Path(attempt_download_asset(f"yolo11{scale}.pt"))
+    base_scale = "n" if scale == "p" else scale
+    base_name = f"yolo11{base_scale}.pt"
+    base_path = Path(attempt_download_asset(base_name))
 
     transferred = 0
     if base_path.exists():
@@ -990,10 +998,10 @@ def _create_custom_yolo11_ckpt(weight: str, output_path: Path) -> Optional[Tuple
 
         target_model.load_state_dict(new_state, strict=False)
         LOGGER.info(
-            f"Transferred {transferred}/{len(target_state)} items from yolo11{scale}.pt to custom '{yaml_path.name}'"
+            f"Transferred {transferred}/{len(target_state)} items from {base_name} to custom '{yaml_path.name}'"
         )
     else:
-        LOGGER.warning(f"WARNING ⚠️ Base weights yolo11{scale}.pt not found; using random init for {yaml_path.name}")
+        LOGGER.warning(f"WARNING ⚠️ Base weights {base_name} not found; using random init for {yaml_path.name}")
 
     torch.save(
         {
@@ -1031,10 +1039,21 @@ def torch_safe_load(weight, safe_only=False):
     from ultralytics.utils.downloads import attempt_download_asset
 
     check_suffix(file=weight, suffix=".pt")
-    file = attempt_download_asset(weight)  # search online if missing locally
     cleanup_temp = False
+    local_file = Path(weight)
+    cached_file = Path(SETTINGS["weights_dir"]) / local_file.name
+    custom_request = _parse_custom_yolo11_pt(weight)
+    if custom_request and not local_file.exists() and not cached_file.exists():
+        # Custom names are generated locally, so do not waste a GitHub lookup on assets that cannot exist upstream.
+        created = _create_custom_yolo11_ckpt(weight, cached_file)
+        if created:
+            file, cleanup_temp = created
+        else:
+            file = attempt_download_asset(weight)
+    else:
+        file = attempt_download_asset(weight)  # search online if missing locally
     if not Path(file).exists():
-        custom_path = SETTINGS["weights_dir"] / Path(Path(file).name)
+        custom_path = Path(SETTINGS["weights_dir"]) / Path(file).name
         created = _create_custom_yolo11_ckpt(weight, custom_path)
         if created:
             file, cleanup_temp = created
@@ -1413,7 +1432,7 @@ def yaml_model_load(path):
         LOGGER.warning(f"WARNING ⚠️ Ultralytics YOLO P6 models now use -p6 suffix. Renaming {path.stem} to {new_stem}.")
         path = path.with_name(new_stem + path.suffix)
 
-    unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
+    unified_path = re.sub(r"(\d+)([pnslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolo11p.yaml -> yolo11.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = yaml_load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
@@ -1423,16 +1442,16 @@ def yaml_model_load(path):
 
 def guess_model_scale(model_path):
     """
-    Extract the size character n, s, m, l, or x of the model's scale from the model path.
+    Extract the size character p, n, s, m, l, or x of the model's scale from the model path.
 
     Args:
         model_path (str | Path): The path to the YOLO model's YAML file.
 
     Returns:
-        (str): The size character of the model's scale (n, s, m, l, or x).
+        (str): The size character of the model's scale (p, n, s, m, l, or x).
     """
     try:
-        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # returns n, s, m, l, or x
+        return re.search(r"yolo[v]?\d+([pnslmx])", Path(model_path).stem).group(1)
     except AttributeError:
         return ""
 
