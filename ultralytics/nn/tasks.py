@@ -905,26 +905,29 @@ class SafeUnpickler(pickle.Unpickler):
             return SafeClass
 
 
-def _parse_custom_yolo11_pt(weight: str) -> Optional[Tuple[str, str]]:
+def _parse_custom_pt(weight: str) -> Optional[Tuple[str, str, str]]:
     name = Path(weight).name
-    match = re.match(r"^yolo11([pnslmx])(?:-(.+))?\.pt$", name)
+    match = re.match(r"^(yolo11|yolov5|yolo5)([pnslmx])(?:-(.+))?\.pt$", name)
     if not match:
         return None
-    scale, suffix = match.groups()
-    # Official n/s/m/l/x checkpoints should keep using the normal download/load path. Plain pico is custom because
-    # there is no official yolo11p.pt asset, while suffixed names identify custom architectures for every scale.
+    
+    family, scale, suffix = match.groups()
     if scale != "p" and suffix is None:
         return None
-    return scale, suffix or ""
+
+    family_dir = "11" if family == "yolo11" else "v5"
+
+    return family_dir, scale, suffix or ""
 
 
-def _resolve_custom_yolo11_yaml(scale: str, suffix: str) -> Optional[Path]:
-    cfg_dir = ROOT / "cfg" / "models" / "11"
+def _resolve_custom_yaml(family: str, scale: str, suffix: str) -> Optional[Path]:
+    cfg_dir = ROOT / "cfg" / "models" / family
+    prefix = "yolo11" if family == "11" else "yolov5"
     separator = "-" if suffix else ""
-    sized = cfg_dir / f"yolo11{scale}{separator}{suffix}.yaml"
+    sized = cfg_dir / f"{prefix}{scale}{separator}{suffix}.yaml"
     if sized.exists():
         return sized
-    unsized = cfg_dir / f"yolo11{separator}{suffix}.yaml"
+    unsized = cfg_dir / f"{prefix}{separator}{suffix}.yaml"
     if unsized.exists():
         return unsized
     return None
@@ -947,15 +950,16 @@ def _find_lcbham_layers(model: "DetectionModel") -> Set[int]:
     return {i for i, m in enumerate(model.model) if isinstance(m, LCBHAM)}
 
 
-def _create_custom_yolo11_ckpt(weight: str, output_path: Path) -> Optional[Tuple[Path, bool]]:
-    parsed = _parse_custom_yolo11_pt(weight)
+def _create_custom_ckpt(weight: str, output_path: Path) -> Optional[Tuple[Path, bool]]:
+    parsed = _parse_custom_pt(weight)
     if not parsed:
         return None
 
-    scale, suffix = parsed
-    yaml_path = _resolve_custom_yolo11_yaml(scale, suffix)
+    family, scale, suffix = parsed
+    yaml_path = _resolve_custom_yaml(family, scale, suffix)
     if not yaml_path:
-        LOGGER.warning(f"WARNING ⚠️ Custom YAML not found for '{weight}', expected yolo11-{suffix}.yaml")
+        prefix = "yolo11" if family == "11" else "yolov5"
+        LOGGER.warning(f"WARNING ⚠️ Custom YAML not found for '{weight}', expected {prefix}-{suffix}.yaml")
         return None
 
     from ultralytics.utils.downloads import attempt_download_asset
@@ -967,7 +971,7 @@ def _create_custom_yolo11_ckpt(weight: str, output_path: Path) -> Optional[Tuple
     target_model = DetectionModel(cfg=cfg_dict, ch=3, nc=80, verbose=False)
     target_state = target_model.state_dict()
     base_scale = "n" if scale == "p" else scale
-    base_name = f"yolo11{base_scale}.pt"
+    base_name = f"yolo11{base_scale}.pt" if family == "11" else f"yolov5{base_scale}.pt"
     base_path = Path(attempt_download_asset(base_name))
 
     transferred = 0
@@ -1017,7 +1021,6 @@ def _create_custom_yolo11_ckpt(weight: str, output_path: Path) -> Optional[Tuple
     )
     return output_path, True
 
-
 def torch_safe_load(weight, safe_only=False):
     """
     Attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised, it catches the
@@ -1042,21 +1045,14 @@ def torch_safe_load(weight, safe_only=False):
     cleanup_temp = False
     local_file = Path(weight)
     cached_file = Path(SETTINGS["weights_dir"]) / local_file.name
-    custom_request = _parse_custom_yolo11_pt(weight)
+    custom_request = _parse_custom_pt(weight)
     if custom_request and not local_file.exists() and not cached_file.exists():
         # Custom names are generated locally, so do not waste a GitHub lookup on assets that cannot exist upstream.
-        created = _create_custom_yolo11_ckpt(weight, cached_file)
+        created = _create_custom_ckpt(weight, cached_file)
         if created:
             file, cleanup_temp = created
         else:
             file = attempt_download_asset(weight)
-    else:
-        file = attempt_download_asset(weight)  # search online if missing locally
-    if not Path(file).exists():
-        custom_path = Path(SETTINGS["weights_dir"]) / Path(file).name
-        created = _create_custom_yolo11_ckpt(weight, custom_path)
-        if created:
-            file, cleanup_temp = created
     try:
         with temporary_modules(
             modules={
