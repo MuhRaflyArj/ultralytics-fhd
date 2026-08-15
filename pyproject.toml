@@ -65,7 +65,7 @@ dependencies = [
     "sng4onnx>=1.0.1",
     "onnx-graphsurgeon>=0.3.26",
     "ai-edge-litert>=1.2.0",
-    "onnx2tf>=1.26.3",
+    "onnx2tf>=1.29.24",
     "nncf>=3.1.0",
 ]
 
