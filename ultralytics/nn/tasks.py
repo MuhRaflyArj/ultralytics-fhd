@@ -1053,6 +1053,8 @@ def torch_safe_load(weight, safe_only=False):
             file, cleanup_temp = created
         else:
             file = attempt_download_asset(weight)
+    else:
+        file = attempt_download_asset(weight)
     try:
         with temporary_modules(
             modules={
